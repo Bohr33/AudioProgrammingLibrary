@@ -38,7 +38,7 @@ typedef struct panpos{
 } PANPOS;
 
 /* TODO define program argument list, excluding flags */
-enum {ARG_PROGNAME,ARG_INFILE,ARG_OUTFILE, ARG_BREAKPOINT, ARG_NARGS};
+enum {ARG_PROGNAME,ARG_INFILE,ARG_OUTFILE, ARG_PANPOS, ARG_NARGS};
 
 PANPOS simplepan(double position);
 PANPOS cp_pan(double position);
@@ -75,27 +75,33 @@ int main(int argc, char* argv[])
 {
 /* STAGE 1 */	
 	PSF_PROPS inprops,outprops;									
-	long framesread;	
+	
 	/* init all dynamic resources to default states */
 	int infile = -1,outfile = -1;
 	int error = 0;
 	PSF_CHPEAK* peaks = NULL;	
 	psf_format outformat =  PSF_FMT_UNKNOWN;
+
+	//Buffer loop related variables
+	long framesread;	
 	unsigned long nframes = NFRAMES;
 	float* inframe = NULL;
 	float* outframe = NULL;
-
+	//Pan position object
 	PANPOS pos;
+	double stereopos = 0;
+
+	int sflag = 0;
 
 	//Declare variables for breakpoint file reading
-	FILE* fp = NULL;
-	unsigned long size;
-	BREAKPOINT* points = NULL;
-	// BREAKPOINT* maxMin = NULL;
-	MAXMINPOINT maxMin;
+	FILE* panFile = NULL;
+	unsigned long panSize = 0;
+	BRKSTREAM* panPoints = NULL;
+	double maxPan, minPan;
 
-	double timeincr;
-	double sampletime = 0.0;
+	unsigned long srate;
+
+
 	
 	
 /* STAGE 2 */	
@@ -108,6 +114,10 @@ int main(int argc, char* argv[])
 			flag = argv[1][1];
 			switch(flag){
 			/*TODO: handle any  flag arguments here */
+			case('s'):
+				sflag = 1;
+				break;
+
 			case('\0'):
 				printf("Error: missing flag name\n");
 				return 1;
@@ -123,7 +133,7 @@ int main(int argc, char* argv[])
 	if(argc < ARG_NARGS){
 		printf("insufficient arguments.\n"
 			/* TODO: add required usage message */
-			"usage: sfpan infile outfile posfile.brk\n"
+			"usage: sfpan [-s] infile outfile posfile.brk\n"
 			"posfile.brk is a breakpoint file"
 			"with values in the range of -1.00 to 1.00\n"
 			"-1.00 = Full Left; 0.00 = Center; 1.00 = Full Right\n"
@@ -131,69 +141,66 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
-	//Read and verify breakpoint file
-	fp = fopen(argv[ARG_BREAKPOINT], "r");
-	if(fp == NULL){
-		printf("Error: unable to open breakpoint file %s", argv[ARG_BREAKPOINT]);
-		error++;
-		goto exit;
+	if(sflag){
+		printf("Simple Pan mode selected\n");
+	}else{
+		printf("Constant Power Pan mode selected\n");
 	}
-	size = 0;
-	points = get_breakpoints(fp, &size);
-	if(points == NULL){
-		printf("No breakpoints read.\n");
-		error++;
-		goto exit;
-	}
-	if(size < 2){
-		printf("Error: at least two breakpoints required\n");
-		free(points);
-		fclose(fp);
-		return 1;
-	}
-	//we require breakpoints to start from 0
-	if(points[0].time != 0.0){
-		printf("Error in breakpoint data: "
-				"first time must be 0.0\n");
-				error++;
-				goto exit;
-	}
-
-	//check values are inrange with function from breakpoints.c
-	if(!inrange(points, -1, 1.0, size)){
-		printf("Error: at least one value in breakpoint file is out of range -1 - 1\n");
-		error++;
-		goto exit;
-	}
-
-	maxMin = minMax(points, size);
-
-	printf("The Maximum value in the Breakpoint file is %f at time %f\n", maxMin.max.value, maxMin.max.time);
-	printf("The Minimum value in the Breakpoint file is %f at time %f\n", maxMin.min.value, maxMin.min.time);
-
 
 	/*  always startup portsf */
 	if(psf_init()){
 		printf("unable to start portsf\n");
 		return 1;
 	}
-/* STAGE 3 */																							
-	infile = psf_sndOpen(argv[ARG_INFILE],&inprops,0);															  
-	if(infile < 0){
-		printf("Error: unable to open infile %s\n",argv[ARG_INFILE]);
-		error++;
-		goto exit;
-	}
-	/* TODO: verify infile format for this application */
 
+	//Open sound file first to determine samplerate;
+	infile = psf_sndOpen(argv[ARG_INFILE], &inprops, 0);
+	if(infile < 0){
+		
+	}
 	//Check input file is mono
 	if(inprops.chans != 1){
 		printf("Error: infile must be MONO");
 		error++;
 		goto exit;
 	}
+	srate = inprops.srate;
+
+	//Read and verify breakpoint file
+	panFile = fopen(argv[ARG_PANPOS], "r");
+	if(panFile == NULL){
+		stereopos = atof(argv[ARG_PANPOS]);
+		if(stereopos < -1.0 || stereopos > 1.0){
+			printf("Error: pan value of %f is out of range\n"
+					"Range: -1.0 to 1.0\n", stereopos);
+			error++;
+			goto exit;
+		}
+	}else{
+
+		panPoints = bps_newstream(panFile, srate, &panSize);
+
+		if(panPoints == NULL){
+			printf("No breakpoints read.\n");
+			error++;
+			goto exit;
+		}
+		//check values are inrange with function from breakpoints.c
+		if(!inrange(panPoints->points, -1, 1.0, panSize)){
+			printf("Error: at least one value in breakpoint file is out of range (-1, 1)\n");
+			error++;
+			goto exit;
+		}
+
+		bps_getminmax(panPoints, &maxPan, &minPan);
+	}
 
 
+
+
+
+
+/* STAGE 3 */																							
 
 	/* allocate space for  sample frame buffer ...*/
 	inframe = (float*) malloc(nframes * inprops.chans * sizeof(float));
@@ -248,25 +255,33 @@ int main(int argc, char* argv[])
 	}
 
 
-/* STAGE 5 */	
-	printf("processing....\n");								
+/* STAGE 5 */
+	//set calculate pan of stereopos in case of no breakpoint file	
+	if(sflag){
+		pos = simplepan(stereopos);
+	}else{
+		pos = cp_pan(stereopos);
+	}
 
-	/* TODO: init any loop-related variables */
-	timeincr = 1.0 / inprops.srate;
-	sampletime = 0.0;
+	printf("processing....\n");		
+
 	while ((framesread = psf_sndReadFloatFrames(infile,inframe,nframes)) > 0){
 	
 		/* <--------  add buffer processing here ------>  */
 		int i, out_i;
-		double stereopos;
-
+		
 		for(i = 0, out_i = 0; i < framesread; i++){
 
-			stereopos = val_at_brktime(points, size, sampletime);
-			pos = cp_pan(stereopos);
+			if(panPoints){
+				stereopos = bps_tick(panPoints);
+					if(sflag){
+						pos = simplepan(stereopos);
+					}else{
+						pos = cp_pan(stereopos);
+					}
+			}
 			outframe[out_i++] = (float) (inframe[i]*pos.left);
 			outframe[out_i++] = (float) (inframe[i]*pos.right);
-			sampletime += timeincr;
 		}
 
 		if(psf_sndWriteFloatFrames(outfile,outframe,framesread) != framesread){
@@ -293,6 +308,7 @@ int main(int argc, char* argv[])
 				printf("CH %ld:\t%.4f at %.4f secs\n", i+1, peaks[i].val, peaktime);
 			}
 	}
+
 /* STAGE 7 */	
 	/* do all cleanup  */    									
 exit:	 	
@@ -306,8 +322,16 @@ exit:
 		free(inframe);
 	if(outframe)
 		free(outframe);
+	if(panFile){
+		fclose(panFile);
+	}
 	if(peaks)
 		free(peaks);
+	if(panPoints){
+		bps_freepoints(panPoints);
+		free(panPoints);
+	}
+	/*TODO: cleanup any other resources */
 
 	psf_finish();
 	return error;
